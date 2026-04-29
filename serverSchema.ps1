@@ -60,39 +60,95 @@ function Invoke-SqlQuery {
     )
 
     $connectionString = New-ConnectionString -Server $ServerInstance -Database $Database
-    $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
-    $command = $connection.CreateCommand()
-    $command.CommandText = $Query
-    $command.CommandTimeout = 0
 
-    $rows = New-Object System.Collections.Generic.List[object]
+    # ------------------------------------------------------------
+    # Primary path: SqlDataReader -> PSCustomObject[]
+    # ------------------------------------------------------------
+    try {
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $command = $connection.CreateCommand()
+        $command.CommandText = $Query
+        $command.CommandTimeout = 0
+
+        $rows = @()
+        $reader = $null
+
+        try {
+            $connection.Open()
+            $reader = $command.ExecuteReader()
+
+            while ($reader.Read()) {
+                $obj = [ordered]@{}
+                for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+                    $name = $reader.GetName($i)
+                    if ($reader.IsDBNull($i)) {
+                        $obj[$name] = $null
+                    }
+                    else {
+                        $obj[$name] = $reader.GetValue($i)
+                    }
+                }
+                $rows += [pscustomobject]$obj
+            }
+
+            Write-Host "Query mode: SqlDataReader"
+            return @($rows)
+        }
+        finally {
+            if ($reader -ne $null) {
+                $reader.Close()
+            }
+            if ($connection.State -ne 'Closed') {
+                $connection.Close()
+            }
+            $connection.Dispose()
+        }
+    }
+    catch {
+        Write-Warning "SqlDataReader mode failed for database [$Database]. Falling back to DataAdapter mode. Error: $($_.Exception.Message)"
+    }
+
+    # ------------------------------------------------------------
+    # Fallback path: DataAdapter -> DataTable -> PSCustomObject[]
+    # ------------------------------------------------------------
+    $connection2 = New-Object System.Data.SqlClient.SqlConnection $connectionString
+    $command2 = $connection2.CreateCommand()
+    $command2.CommandText = $Query
+    $command2.CommandTimeout = 0
+
+    $adapter = New-Object System.Data.SqlClient.SqlDataAdapter $command2
+    $dataSet = New-Object System.Data.DataSet
 
     try {
-        $connection.Open()
-        $reader = $command.ExecuteReader()
+        $connection2.Open()
+        [void]$adapter.Fill($dataSet)
 
-        while ($reader.Read()) {
-            $obj = [ordered]@{}
-            for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-                $name = $reader.GetName($i)
-                if ($reader.IsDBNull($i)) {
-                    $obj[$name] = $null
+        $rows = @()
+
+        if ($dataSet.Tables.Count -gt 0) {
+            foreach ($row in $dataSet.Tables[0].Rows) {
+                $obj = [ordered]@{}
+                foreach ($col in $dataSet.Tables[0].Columns) {
+                    $colName = $col.ColumnName
+                    if ($row.IsNull($colName)) {
+                        $obj[$colName] = $null
+                    }
+                    else {
+                        $obj[$colName] = $row[$colName]
+                    }
                 }
-                else {
-                    $obj[$name] = $reader.GetValue($i)
-                }
+                $rows += [pscustomobject]$obj
             }
-            $rows.Add([pscustomobject]$obj)
         }
 
-        $reader.Close()
+        Write-Host "Query mode: DataAdapter fallback"
         return @($rows)
     }
     finally {
-        if ($connection.State -ne 'Closed') {
-            $connection.Close()
+        if ($connection2.State -ne 'Closed') {
+            $connection2.Close()
         }
-        $connection.Dispose()
+        $connection2.Dispose()
     }
 }
 
@@ -111,9 +167,9 @@ SELECT
     CAST(SERVERPROPERTY('EngineEdition') AS nvarchar(128)) AS EngineEdition;
 "@
 
-$serverInfoRows = Invoke-SqlQuery -Database "master" -Query $serverInfoQuery
+$serverInfoRows = @(Invoke-SqlQuery -Database "master" -Query $serverInfoQuery)
 
-if (-not $serverInfoRows -or $serverInfoRows.Count -eq 0) {
+if ($serverInfoRows.Count -eq 0) {
     throw "Could not retrieve server verification details from [$ServerInstance]."
 }
 
@@ -140,7 +196,7 @@ ORDER BY name;
 "@
 
 Write-Host "Loading non-system online databases..."
-$databaseRows = Invoke-SqlQuery -Database "master" -Query $dbQuery
+$databaseRows = @(Invoke-SqlQuery -Database "master" -Query $dbQuery)
 
 Write-Host "Databases to process: $($databaseRows.Count)"
 foreach ($db in $databaseRows) {
