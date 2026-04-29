@@ -7,9 +7,6 @@ RENAME_FROM=""
 RENAME_TO=""
 SKIP_CONTAINS=()
 
-# ------------------------------------------------------------
-# Argument parsing
-# ------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --master)
@@ -21,11 +18,13 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --rename-from)
-      RENAME_FROM="${2:-}"
+      RENAME_FROM="${2-}"
+      RENAME_FROM_SET=1
       shift 2
       ;;
     --rename-to)
-      RENAME_TO="${2:-}"
+      RENAME_TO="${2-}"
+      RENAME_TO_SET=1
       shift 2
       ;;
     --skip-contains)
@@ -35,7 +34,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'EOF'
 Usage:
-  compare-schema-v2.sh --master master-schema.json --target target-schema.json [options]
+  compare-schema.sh --master master-schema.json --target target-schema.json [options]
 
 Options:
   --rename-from TEXT       Replace this text in database names before comparison
@@ -45,26 +44,20 @@ Options:
   -h, --help               Show help
 
 Examples:
-  ./compare-schema-v2.sh \
-    --master master.json \
-    --target target.json
+  ./compare-schema.sh \
+    --master spain-schema.json \
+    --target uk-schema.json
 
-  ./compare-schema-v2.sh \
-    --master master.json \
-    --target target.json \
-    --rename-from "_ownName" \
-    --rename-to "_alternativeName"
+  ./compare-schema.sh \
+    --master spain-schema.json \
+    --target uk-schema.json \
+    --rename-from "Enveseur_" \
+    --rename-to ""
 
-  ./compare-schema-v2.sh \
-    --master master.json \
-    --target target.json \
-    --skip-contains "Dev" \
-    --skip-contains "_Test"
-
-Notes:
-  - Only structure metadata is compared, never row data.
-  - Rename is applied to BOTH master and target before comparison.
-  - Skip rules are applied after rename normalization.
+  ./compare-schema.sh \
+    --master spain-schema.json \
+    --target uk-schema.json \
+    --skip-contains "Dev"
 EOF
       exit 0
       ;;
@@ -76,9 +69,6 @@ EOF
   esac
 done
 
-# ------------------------------------------------------------
-# Styling
-# ------------------------------------------------------------
 if [[ -t 1 ]]; then
   RED="$(printf '\033[31m')"
   GREEN="$(printf '\033[32m')"
@@ -114,9 +104,6 @@ err() {
   echo "${RED}$1${RESET}"
 }
 
-# ------------------------------------------------------------
-# Validation
-# ------------------------------------------------------------
 section "SCHEMA COMPARISON DISCLAIMER"
 echo "This comparison uses ONLY schema structure metadata."
 echo "No actual database row data or table content is read or compared."
@@ -143,63 +130,35 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -n "$RENAME_FROM" && -z "$RENAME_TO" ]]; then
+RENAME_FROM_SET=0
+RENAME_TO_SET=0
+
+if [[ $RENAME_FROM_SET -eq 1 && $RENAME_TO_SET -eq 0 ]]; then
   err "If --rename-from is used, --rename-to must also be provided."
   exit 1
 fi
 
-if [[ -z "$RENAME_FROM" && -n "$RENAME_TO" ]]; then
+if [[ $RENAME_FROM_SET -eq 0 && $RENAME_TO_SET -eq 1 ]]; then
   err "If --rename-to is used, --rename-from must also be provided."
   exit 1
 fi
 
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+OUTPUT_DIR="./compare-output"
+mkdir -p "$OUTPUT_DIR"
+WORKDIR="$OUTPUT_DIR"
 
-# ------------------------------------------------------------
-# Build skip filter for jq
-# ------------------------------------------------------------
-SKIP_JSON="$(printf '%s\n' "${SKIP_CONTAINS[@]:-}" | jq -R . | jq -s .)"
+if [[ ${#SKIP_CONTAINS[@]} -eq 0 ]]; then
+  SKIP_JSON='[]'
+else
+  SKIP_JSON="$(printf '%s\n' "${SKIP_CONTAINS[@]}" | jq -R . | jq -s .)"
+fi
 
-# ------------------------------------------------------------
-# Verification
-# ------------------------------------------------------------
 section "VERIFICATION"
 
 echo "Master file : $MASTER_FILE"
 echo "Target file : $TARGET_FILE"
 echo
 
-echo "${BOLD}Master server details:${RESET}"
-jq -r '
-  [
-    "  Requested instance : " + (.server.requested_server_instance // "n/a"),
-    "  Detected server    : " + (.server.detected_server_name // "n/a"),
-    "  Machine name       : " + (.server.machine_name // "n/a"),
-    "  Instance name      : " + ((.server.instance_name // "") | if . == "" then "default" else . end),
-    "  Edition            : " + (.server.edition // "n/a"),
-    "  Product version    : " + (.server.product_version // "n/a"),
-    "  Product level      : " + (.server.product_level // "n/a"),
-    "  Extracted          : " + (.extracted // "n/a")
-  ] | .[]
-' "$MASTER_FILE"
-
-echo
-echo "${BOLD}Target server details:${RESET}"
-jq -r '
-  [
-    "  Requested instance : " + (.server.requested_server_instance // "n/a"),
-    "  Detected server    : " + (.server.detected_server_name // "n/a"),
-    "  Machine name       : " + (.server.machine_name // "n/a"),
-    "  Instance name      : " + ((.server.instance_name // "") | if . == "" then "default" else . end),
-    "  Edition            : " + (.server.edition // "n/a"),
-    "  Product version    : " + (.server.product_version // "n/a"),
-    "  Product level      : " + (.server.product_level // "n/a"),
-    "  Extracted          : " + (.extracted // "n/a")
-  ] | .[]
-' "$TARGET_FILE"
-
-echo
 echo "${BOLD}Normalization rules:${RESET}"
 if [[ -n "$RENAME_FROM" ]]; then
   echo "  Database rename : '$RENAME_FROM' -> '$RENAME_TO'"
@@ -221,9 +180,6 @@ echo "Comparison direction confirmation:"
 echo "  Baseline / master : $MASTER_FILE"
 echo "  Compared against  : $TARGET_FILE"
 
-# ------------------------------------------------------------
-# jq helpers
-# ------------------------------------------------------------
 build_db_list() {
   local input_file="$1"
   jq -r \
@@ -235,7 +191,7 @@ build_db_list() {
 
     def keep_db:
       . as $db
-      | ($skip_contains | map($db | contains(.)) | any) | not;
+      | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
 
     .databases[]
     | .name = (.name | normalize_db)
@@ -255,7 +211,7 @@ build_table_list() {
 
     def keep_db:
       . as $db
-      | ($skip_contains | map($db | contains(.)) | any) | not;
+      | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
 
     .databases[]
     | .name = (.name | normalize_db)
@@ -277,7 +233,7 @@ build_column_list() {
 
     def keep_db:
       . as $db
-      | ($skip_contains | map($db | contains(.)) | any) | not;
+      | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
 
     .databases[]
     | .name = (.name | normalize_db)
@@ -314,7 +270,7 @@ build_index_list() {
 
     def keep_db:
       . as $db
-      | ($skip_contains | map($db | contains(.)) | any) | not;
+      | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
 
     .databases[]
     | .name = (.name | normalize_db)
@@ -339,13 +295,10 @@ build_index_list() {
   ' "$input_file" | sort
 }
 
-# ------------------------------------------------------------
-# Prepare normalized data
-# ------------------------------------------------------------
 section "PREPARING NORMALIZED STRUCTURE DATA"
 
-build_db_list "$MASTER_FILE"   > "$WORKDIR/master_databases.txt"
-build_db_list "$TARGET_FILE"   > "$WORKDIR/target_databases.txt"
+build_db_list "$MASTER_FILE" > "$WORKDIR/master_databases.txt"
+build_db_list "$TARGET_FILE" > "$WORKDIR/target_databases.txt"
 
 build_table_list "$MASTER_FILE" > "$WORKDIR/master_tables.txt"
 build_table_list "$TARGET_FILE" > "$WORKDIR/target_tables.txt"
@@ -358,9 +311,6 @@ build_index_list "$TARGET_FILE" > "$WORKDIR/target_indexes.txt"
 
 ok "Normalized comparison files prepared."
 
-# ------------------------------------------------------------
-# Produce diffs
-# ------------------------------------------------------------
 comm -23 "$WORKDIR/master_databases.txt" "$WORKDIR/target_databases.txt" > "$WORKDIR/db_only_in_master.txt" || true
 comm -13 "$WORKDIR/master_databases.txt" "$WORKDIR/target_databases.txt" > "$WORKDIR/db_only_in_target.txt" || true
 
@@ -393,9 +343,6 @@ INDEX_TARGET_COUNT="$(count_lines "$WORKDIR/indexes_only_in_target.txt")"
 
 TOTAL_DIFFS=$((DB_MASTER_COUNT + DB_TARGET_COUNT + TABLE_MASTER_COUNT + TABLE_TARGET_COUNT + COLUMN_MASTER_COUNT + COLUMN_TARGET_COUNT + INDEX_MASTER_COUNT + INDEX_TARGET_COUNT))
 
-# ------------------------------------------------------------
-# Summary
-# ------------------------------------------------------------
 section "SUMMARY"
 
 echo "Databases only in master : $DB_MASTER_COUNT"
@@ -413,52 +360,3 @@ if [[ "$TOTAL_DIFFS" -eq 0 ]]; then
 else
   warn "Structural differences found: $TOTAL_DIFFS"
 fi
-
-print_block() {
-  local title="$1"
-  local file="$2"
-  local max_lines="${3:-50}"
-
-  section "$title"
-
-  if [[ ! -s "$file" ]]; then
-    ok "None"
-    return
-  fi
-
-  local line_count
-  line_count="$(wc -l < "$file" | tr -d ' ')"
-
-  echo "Count: $line_count"
-  echo
-
-  if [[ "$line_count" -le "$max_lines" ]]; then
-    cat "$file"
-  else
-    head -n "$max_lines" "$file"
-    echo
-    warn "... output truncated, showing first $max_lines lines of $line_count ..."
-  fi
-}
-
-print_block "DATABASES ONLY IN MASTER" "$WORKDIR/db_only_in_master.txt" 100
-print_block "DATABASES ONLY IN TARGET" "$WORKDIR/db_only_in_target.txt" 100
-
-print_block "TABLES ONLY IN MASTER" "$WORKDIR/tables_only_in_master.txt" 100
-print_block "TABLES ONLY IN TARGET" "$WORKDIR/tables_only_in_target.txt" 100
-
-print_block "COLUMNS ONLY IN MASTER OR CHANGED FROM TARGET" "$WORKDIR/columns_only_in_master.txt" 80
-print_block "COLUMNS ONLY IN TARGET OR CHANGED FROM MASTER" "$WORKDIR/columns_only_in_target.txt" 80
-
-print_block "INDEXES ONLY IN MASTER OR CHANGED FROM TARGET" "$WORKDIR/indexes_only_in_master.txt" 80
-print_block "INDEXES ONLY IN TARGET OR CHANGED FROM MASTER" "$WORKDIR/indexes_only_in_target.txt" 80
-
-section "COMPARISON COMPLETE"
-
-if [[ "$TOTAL_DIFFS" -eq 0 ]]; then
-  ok "Master and target match on compared schema structure."
-else
-  warn "Differences were found between master and target schema structure."
-fi
-
-echo "Reminder: only structure metadata was compared, not actual data."
