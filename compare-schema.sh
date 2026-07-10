@@ -125,6 +125,8 @@ section "SCHEMA COMPARISON DISCLAIMER"
 echo "This comparison uses ONLY schema structure metadata."
 echo "No actual database row data or table content is read or compared."
 echo "Only databases, tables, columns, data types, and indexes are checked."
+echo "Default expressions are normalized only for simple numeric equivalents"
+echo "such as: ('0'), ((0)), 0, (0)"
 echo
 
 if [[ -z "$MASTER_FILE" || -z "$TARGET_FILE" ]]; then
@@ -196,6 +198,8 @@ else
   echo "  Compare column order/id : no"
 fi
 
+echo "  Normalize defaults      : yes, numeric only"
+echo "                            examples: ('0'), ((0)), 0, (0)"
 echo
 echo "Comparison direction confirmation:"
 echo "  Baseline / master : $MASTER_FILE"
@@ -258,6 +262,21 @@ build_column_list() {
         . as $db
         | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
 
+      def strip_outer_parens:
+        if test("^\\(.*\\)$") then .[1:-1] | strip_outer_parens else . end;
+
+      def normalize_numeric_default:
+        (. // "")
+        | gsub("^\\s+|\\s+$"; "")
+        | strip_outer_parens
+        | gsub("^\\s+|\\s+$"; "")
+        | if test("^'\''-?[0-9]+(\\.[0-9]+)?'\''$")
+          then .[1:-1]
+          elif test("^-?[0-9]+(\\.[0-9]+)?$")
+          then .
+          else (. // "")
+          end;
+
       .databases[]
       | .name = (.name | normalize_db)
       | select(.name | keep_db)
@@ -277,7 +296,7 @@ build_column_list() {
           .is_nullable,
           .is_identity,
           .is_computed,
-          (.default_definition // "")
+          (.default_definition | normalize_numeric_default)
         ] | @tsv
     ' "$input_file" | sort
   else
@@ -291,6 +310,21 @@ build_column_list() {
       def keep_db:
         . as $db
         | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
+
+      def strip_outer_parens:
+        if test("^\\(.*\\)$") then .[1:-1] | strip_outer_parens else . end;
+
+      def normalize_numeric_default:
+        (. // "")
+        | gsub("^\\s+|\\s+$"; "")
+        | strip_outer_parens
+        | gsub("^\\s+|\\s+$"; "")
+        | if test("^'\''-?[0-9]+(\\.[0-9]+)?'\''$")
+          then .[1:-1]
+          elif test("^-?[0-9]+(\\.[0-9]+)?$")
+          then .
+          else (. // "")
+          end;
 
       .databases[]
       | .name = (.name | normalize_db)
@@ -310,7 +344,7 @@ build_column_list() {
           .is_nullable,
           .is_identity,
           .is_computed,
-          (.default_definition // "")
+          (.default_definition | normalize_numeric_default)
         ] | @tsv
     ' "$input_file" | sort
   fi
