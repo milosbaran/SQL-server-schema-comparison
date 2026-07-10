@@ -34,7 +34,15 @@ Skip dev databases
   --skip-contains "Dev"
 ```
 
-Combine both
+Ignore column order. The same column in a different physical order will not be flagged as a difference.
+```bash
+./compare-schema-v2.sh \
+  --master master-schema.json \
+  --target target-schema.json \
+  --ignore-column-order
+```
+
+Combine all
 ```bash
 ./compare-schema-v2.sh \
   --master master-schema.json \
@@ -42,5 +50,6 @@ Combine both
   --rename-from "_ownName" \
   --rename-to "_alternativeName" \
   --skip-contains "Dev" \
-  --skip-contains "_Test"
+  --skip-contains "_Test" \
+  --ignore-column-order
 ```
