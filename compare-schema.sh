@@ -5,6 +5,9 @@ MASTER_FILE=""
 TARGET_FILE=""
 RENAME_FROM=""
 RENAME_TO=""
+RENAME_FROM_SET=0
+RENAME_TO_SET=0
+COMPARE_COLUMN_ORDER=1
 SKIP_CONTAINS=()
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +34,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_CONTAINS+=("${2:-}")
       shift 2
       ;;
+    --ignore-column-order)
+      COMPARE_COLUMN_ORDER=0
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage:
@@ -39,8 +46,10 @@ Usage:
 Options:
   --rename-from TEXT       Replace this text in database names before comparison
   --rename-to TEXT         Replacement text for --rename-from
+                           Empty value is allowed, e.g. --rename-to ""
   --skip-contains TEXT     Skip any database whose name contains TEXT
                            Can be used multiple times
+  --ignore-column-order    Ignore column_id / physical column order in column comparison
   -h, --help               Show help
 
 Examples:
@@ -58,6 +67,14 @@ Examples:
     --master spain-schema.json \
     --target uk-schema.json \
     --skip-contains "Dev"
+
+  ./compare-schema.sh \
+    --master spain-schema.json \
+    --target uk-schema.json \
+    --rename-from "Enveseur_" \
+    --rename-to "" \
+    --skip-contains "Dev" \
+    --ignore-column-order
 EOF
       exit 0
       ;;
@@ -130,9 +147,6 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-RENAME_FROM_SET=0
-RENAME_TO_SET=0
-
 if [[ $RENAME_FROM_SET -eq 1 && $RENAME_TO_SET -eq 0 ]]; then
   err "If --rename-from is used, --rename-to must also be provided."
   exit 1
@@ -157,22 +171,29 @@ section "VERIFICATION"
 
 echo "Master file : $MASTER_FILE"
 echo "Target file : $TARGET_FILE"
+echo "Output dir  : $WORKDIR"
 echo
 
 echo "${BOLD}Normalization rules:${RESET}"
-if [[ -n "$RENAME_FROM" ]]; then
-  echo "  Database rename : '$RENAME_FROM' -> '$RENAME_TO'"
+if [[ -n "$RENAME_FROM" || $RENAME_FROM_SET -eq 1 ]]; then
+  echo "  Database rename         : '$RENAME_FROM' -> '$RENAME_TO'"
 else
-  echo "  Database rename : none"
+  echo "  Database rename         : none"
 fi
 
 if [[ ${#SKIP_CONTAINS[@]} -gt 0 ]]; then
-  echo "  Skip contains   :"
+  echo "  Skip contains           :"
   for s in "${SKIP_CONTAINS[@]}"; do
     echo "    - $s"
   done
 else
-  echo "  Skip contains   : none"
+  echo "  Skip contains           : none"
+fi
+
+if [[ "$COMPARE_COLUMN_ORDER" -eq 1 ]]; then
+  echo "  Compare column order/id : yes"
+else
+  echo "  Compare column order/id : no"
 fi
 
 echo
@@ -224,39 +245,75 @@ build_table_list() {
 
 build_column_list() {
   local input_file="$1"
-  jq -r \
-    --arg rename_from "$RENAME_FROM" \
-    --arg rename_to "$RENAME_TO" \
-    --argjson skip_contains "$SKIP_JSON" '
-    def normalize_db:
-      if $rename_from != "" then gsub($rename_from; $rename_to) else . end;
 
-    def keep_db:
-      . as $db
-      | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
+  if [[ "$COMPARE_COLUMN_ORDER" -eq 1 ]]; then
+    jq -r \
+      --arg rename_from "$RENAME_FROM" \
+      --arg rename_to "$RENAME_TO" \
+      --argjson skip_contains "$SKIP_JSON" '
+      def normalize_db:
+        if $rename_from != "" then gsub($rename_from; $rename_to) else . end;
 
-    .databases[]
-    | .name = (.name | normalize_db)
-    | select(.name | keep_db)
-    | . as $db
-    | $db.tables[] as $t
-    | $t.columns[]
-    | [
-        $db.name,
-        $t.schema,
-        $t.table,
-        .column_id,
-        .name,
-        .data_type,
-        .max_length,
-        .precision,
-        .scale,
-        .is_nullable,
-        .is_identity,
-        .is_computed,
-        (.default_definition // "")
-      ] | @tsv
-  ' "$input_file" | sort
+      def keep_db:
+        . as $db
+        | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
+
+      .databases[]
+      | .name = (.name | normalize_db)
+      | select(.name | keep_db)
+      | . as $db
+      | $db.tables[] as $t
+      | $t.columns[]
+      | [
+          $db.name,
+          $t.schema,
+          $t.table,
+          .column_id,
+          .name,
+          .data_type,
+          .max_length,
+          .precision,
+          .scale,
+          .is_nullable,
+          .is_identity,
+          .is_computed,
+          (.default_definition // "")
+        ] | @tsv
+    ' "$input_file" | sort
+  else
+    jq -r \
+      --arg rename_from "$RENAME_FROM" \
+      --arg rename_to "$RENAME_TO" \
+      --argjson skip_contains "$SKIP_JSON" '
+      def normalize_db:
+        if $rename_from != "" then gsub($rename_from; $rename_to) else . end;
+
+      def keep_db:
+        . as $db
+        | ([ $skip_contains[] | select(. != "") | . as $pat | ($db | contains($pat)) ] | any) | not;
+
+      .databases[]
+      | .name = (.name | normalize_db)
+      | select(.name | keep_db)
+      | . as $db
+      | $db.tables[] as $t
+      | $t.columns[]
+      | [
+          $db.name,
+          $t.schema,
+          $t.table,
+          .name,
+          .data_type,
+          .max_length,
+          .precision,
+          .scale,
+          .is_nullable,
+          .is_identity,
+          .is_computed,
+          (.default_definition // "")
+        ] | @tsv
+    ' "$input_file" | sort
+  fi
 }
 
 build_index_list() {
@@ -360,3 +417,22 @@ if [[ "$TOTAL_DIFFS" -eq 0 ]]; then
 else
   warn "Structural differences found: $TOTAL_DIFFS"
 fi
+
+section "OUTPUT FILES"
+echo "Comparison files written to: $WORKDIR"
+echo "  - master_databases.txt"
+echo "  - target_databases.txt"
+echo "  - master_tables.txt"
+echo "  - target_tables.txt"
+echo "  - master_columns.txt"
+echo "  - target_columns.txt"
+echo "  - master_indexes.txt"
+echo "  - target_indexes.txt"
+echo "  - db_only_in_master.txt"
+echo "  - db_only_in_target.txt"
+echo "  - tables_only_in_master.txt"
+echo "  - tables_only_in_target.txt"
+echo "  - columns_only_in_master.txt"
+echo "  - columns_only_in_target.txt"
+echo "  - indexes_only_in_master.txt"
+echo "  - indexes_only_in_target.txt"
